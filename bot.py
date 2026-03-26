@@ -1,13 +1,11 @@
 import json
-import time
-from telegram import Bot, Update, ChatPermissions
-from telegram.ext import Updater, CommandHandler, CallbackContext
+import asyncio
+from datetime import datetime
+from telegram import Update, ChatPermissions
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 TOKEN = "8266202967:AAFGSWb1tWaK325Qq7OKFdC-8K2p-yyWLis"
-bot = Bot(token=TOKEN)
-
 FILE = "data.json"
-
 
 # ========= DATA HANDLING =========
 def load_data():
@@ -21,17 +19,15 @@ def save_data(data):
     with open(FILE, "w") as f:
         json.dump(data, f)
 
+# تحميل البيانات عند التشغيل
 data = load_data()
-
 
 # ========= COMMANDS =========
 
-# ➜ إضافة ميعاد جديد
-def addtime(update: Update, context: CallbackContext):
+async def addtime(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-
     try:
-        open_time = context.args[0]
+        open_time = context.args[0]  # format HH:MM
         close_time = context.args[1]
 
         if chat_id not in data:
@@ -43,83 +39,70 @@ def addtime(update: Update, context: CallbackContext):
         })
 
         save_data(data)
+        await update.message.reply_text(f"✅ تم إضافة الميعاد:\nفتح: {open_time} | قفل: {close_time}")
+    except (IndexError, ValueError):
+        await update.message.reply_text("❌ استخدام خاطئ! اكتب: /addtime 08:00 10:00")
 
-        update.message.reply_text("✅ تم إضافة الميعاد")
-
-    except:
-        update.message.reply_text("❌ استخدم: /addtime 08:00 10:00")
-
-
-# ➜ عرض المواعيد
-def showtimes(update: Update, context: CallbackContext):
+async def showtimes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-
-    if chat_id not in data or len(data[chat_id]) == 0:
-        update.message.reply_text("❌ مفيش مواعيد")
+    if chat_id not in data or not data[chat_id]:
+        await update.message.reply_text("❌ مفيش مواعيد مسجلة.")
         return
 
-    msg = "📅 المواعيد:\n"
+    msg = "📅 المواعيد الحالية:\n"
     for t in data[chat_id]:
         msg += f"- فتح: {t['open']} | قفل: {t['close']}\n"
+    await update.message.reply_text(msg)
 
-    update.message.reply_text(msg)
-
-
-# ➜ مسح المواعيد
-def cleartimes(update: Update, context: CallbackContext):
+async def cleartimes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-
     data[chat_id] = []
     save_data(data)
+    await update.message.reply_text("🗑 تم مسح كل المواعيد لهذا الشات.")
 
-    update.message.reply_text("🗑 تم مسح كل المواعيد")
+# ========= BACKGROUND CHECK (The Core Logic) =========
 
-
-# ========= GROUP CONTROL =========
-def open_group(chat_id):
-    try:
-        bot.set_chat_permissions(
-            chat_id=chat_id,
-            permissions=ChatPermissions(can_send_messages=True)
-        )
-    except:
-        pass
-
-def close_group(chat_id):
-    try:
-        bot.set_chat_permissions(
-            chat_id=chat_id,
-            permissions=ChatPermissions(can_send_messages=False)
-        )
-    except:
-        pass
-
-
-# ========= MAIN LOOP =========
-def run():
-    updater = Updater(TOKEN)
-    dp = updater.dispatcher
-
-    dp.add_handler(CommandHandler("addtime", addtime))
-    dp.add_handler(CommandHandler("showtimes", showtimes))
-    dp.add_handler(CommandHandler("cleartimes", cleartimes))
-
-    updater.start_polling()
-
-    print("Bot is running...")
-
-    while True:
-        now = time.strftime("%H:%M")
-
-        for chat_id, times_list in data.items():
-            for t in times_list:
+async def check_times(context: ContextTypes.DEFAULT_TYPE):
+    """دالة بتشتغل كل دقيقة بتشيك على المواعيد"""
+    now = datetime.now().strftime("%H:%M")
+    
+    for chat_id, times_list in data.items():
+        for t in times_list:
+            try:
                 if now == t["open"]:
-                    open_group(chat_id)
+                    await context.bot.set_chat_permissions(
+                        chat_id=chat_id,
+                        permissions=ChatPermissions(can_send_messages=True)
+                    )
+                    # اختياري: إرسال رسالة تنبيه
+                    # await context.bot.send_message(chat_id=chat_id, text="🔓 تم فتح المجموعة الآن.")
 
                 if now == t["close"]:
-                    close_group(chat_id)
+                    await context.bot.set_chat_permissions(
+                        chat_id=chat_id,
+                        permissions=ChatPermissions(can_send_messages=False)
+                    )
+                    # await context.bot.send_message(chat_id=chat_id, text="🔒 تم قفل المجموعة الآن.")
+            except Exception as e:
+                print(f"Error updating permissions for {chat_id}: {e}")
 
-        time.sleep(30)
+# ========= STARTING THE BOT =========
 
+def main():
+    # بناء التطبيق
+    application = ApplicationBuilder().token(TOKEN).build()
 
-run()
+    # إضافة الأوامر
+    application.add_handler(CommandHandler("addtime", addtime))
+    application.add_handler(CommandHandler("showtimes", showtimes))
+    application.add_handler(CommandHandler("cleartimes", cleartimes))
+
+    # إعداد الـ JobQueue للتحقق من المواعيد كل 30 ثانية
+    job_queue = application.job_queue
+    job_queue.run_repeating(check_times, interval=30, first=10)
+
+    print("البوت شغال دلوقتي...")
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
